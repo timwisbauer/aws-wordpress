@@ -36,6 +36,7 @@ jobs:
         AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   Terraform:
+    needs: Terraform-Bootstrap
     name: Terraform Plan
     runs-on: ubuntu-latest
     defaults:
@@ -88,4 +89,3 @@ jobs:
             repo: context.repo.repo,
             body: output
           })
-          
