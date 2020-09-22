@@ -74,8 +74,7 @@ jobs:
       with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
         script: |
-          const output = 
-          <details><summary>Show Plan</summary>
+          const output = <details><summary>Show Plan</summary>
           
           \`\`\`${process.env.PLAN}\`\`\`
           
