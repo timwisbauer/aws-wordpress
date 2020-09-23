@@ -8,7 +8,7 @@ provider "aws" {
 
 terraform {
   backend "s3" {
-    bucket = "tfstate-timwisbauer-tf-ansible-wordpress"
+    bucket = "tfstate-timwisbauer-wordpress"
     key    = "default-infrastructure"
     region = "us-east-1"
   }
@@ -22,7 +22,7 @@ module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> v2.0"
 
-  name = "tf-ansible-wordpress"
+  name = "wordpress"
   cidr = "10.0.0.0/16"
 
   azs             = ["us-east-1a", "us-east-1b", "us-east-1c"]

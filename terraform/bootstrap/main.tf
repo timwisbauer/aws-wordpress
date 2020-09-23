@@ -4,7 +4,7 @@ provider "aws" {
 }
 
 resource "aws_s3_bucket" "terraform_state" {
-  bucket = "tfstate-timwisbauer-tf-ansible-wordpress"
+  bucket = "tfstate-timwisbauer-wordpress"
 
   versioning {
     enabled = false
