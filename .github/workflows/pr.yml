@@ -8,7 +8,7 @@ on:
 
 jobs:
   Terraform-Bootstrap:
-    name: Terraform Plan & Apply
+    name: Terraform State Bootstrap
     runs-on: ubuntu-latest
     defaults:
       run:
