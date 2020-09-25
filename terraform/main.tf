@@ -46,8 +46,6 @@ module "vpc" {
 # ALB configuration
 ##################################################################
 
-
-
 module "alb" {
   source  = "terraform-aws-modules/alb/aws"
   version = "~> 5.0"
@@ -65,9 +63,6 @@ module "alb" {
       name_prefix      = "wp-"
       backend_protocol = "HTTP"
       backend_port     = 80
-      health_check = {
-        path = "/phpinfo.php"
-      }
     }
   ]
   http_tcp_listeners = [
@@ -103,15 +98,19 @@ module "alb_security_group" {
 module "asg" {
   source  = "terraform-aws-modules/autoscaling/aws"
   version = "~> 3.0"
+  depends_on = [
+    module.db
+  ]
 
   name = var.project.name
 
   # Launch configuration
   lc_name = "${var.project.name}-lc"
 
-  image_id        = data.aws_ami.amazon_linux.id
-  instance_type   = var.project.instance_type
-  security_groups = [module.alb_security_group.this_security_group_id]
+  image_id             = data.aws_ami.amazon_linux.id
+  instance_type        = var.project.instance_type
+  security_groups      = [module.asg_security_group.this_security_group_id]
+  iam_instance_profile = aws_iam_instance_profile.wordpress_secrets_profile.id
 
   ebs_block_device = [
     {
@@ -147,6 +146,7 @@ module "asg" {
   }
 }
 
+# AMI
 data "aws_ami" "amazon_linux" {
   most_recent = true
 
@@ -169,23 +169,35 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
+# Userdata
 locals {
   user_data = <<EOF
 #!/bin/bash
 yum update -y
-amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
-yum install -y httpd mariadb-server
-systemctl start httpd
+cd /tmp
+wget https://wordpress.org/latest.tar.gz
+tar xvf latest.tar.gz
+yum install -y httpd mariadb-server jq
+amazon-linux-extras install -y php7.3
+yum install -y php-pecl-mcrypt php-pecl-imagick php-mbstring
+systemctl enable mariadb
+systemctl start mariadb
 systemctl enable httpd
-usermod -a -G apache ec2-user
-chown -R ec2-user:apache /var/www
-chmod 2775 /var/www
-find /var/www -type d -exec chmod 2775 {} \;
-find /var/www -type f -exec chmod 0664 {} \;
-echo "<?php phpinfo(); ?>" > /var/www/html/phpinfo.php
+systemctl start httpd
+rsync -r /tmp/wordpress/. /var/www/html
+aws secretsmanager get-secret-value --secret-id wordpress-rds-secrets --query SecretString --version-stage AWSCURRENT --region us-east-1 --output text | jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|.[]' > /var/www/.env
+curl -sS https://getcomposer.org/installer | sudo php
+mv composer.phar /usr/local/bin/composer
+ln -s /usr/local/bin/composer /usr/bin/composer
+cd /var/www/
+wget https://raw.githubusercontent.com/rayheffer/wp-secrets/master/wp-config.php
+wget https://raw.githubusercontent.com/rayheffer/wp-secrets/master/composer.json
+sudo composer install
+chown -R apache:apache /var/www/
 EOF
 }
 
+# Security group allowing ALB to EC2 instances.
 module "asg_security_group" {
   source  = "terraform-aws-modules/security-group/aws"
   version = "~> 3.0"
@@ -200,4 +212,219 @@ module "asg_security_group" {
       source_security_group_id = module.alb_security_group.this_security_group_id
     }
   ]
+  egress_rules        = ["all-all"]
+}
+
+# IAM role, policy, and instance profile for accessing secrets from AWS Secrets Manager.
+resource "aws_iam_role" "wordpress_iam_role" {
+  name = "wordpress_iam_role"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+EOF
+
+  tags = {
+    application = "wordpress"
+  }
+}
+
+resource "aws_iam_role_policy" "wordpress_secrets_policy" {
+  name = "wordpress_secrets_policy"
+  role = aws_iam_role.wordpress_iam_role.id
+
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Effect": "Allow",
+      "Resource": "${data.aws_secretsmanager_secret_version.rds_creds.arn}"
+    }
+  ]
+}
+EOF
+}
+
+resource "aws_iam_role_policy" "wordpress_ssm_policy" {
+  name = "wordpress_ssm_policy"
+  role = aws_iam_role.wordpress_iam_role.id
+
+  policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ssm:DescribeAssociation",
+                "ssm:GetDeployablePatchSnapshotForInstance",
+                "ssm:GetDocument",
+                "ssm:DescribeDocument",
+                "ssm:GetManifest",
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:ListAssociations",
+                "ssm:ListInstanceAssociations",
+                "ssm:PutInventory",
+                "ssm:PutComplianceItems",
+                "ssm:PutConfigurePackageResult",
+                "ssm:UpdateAssociationStatus",
+                "ssm:UpdateInstanceAssociationStatus",
+                "ssm:UpdateInstanceInformation"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ssmmessages:CreateControlChannel",
+                "ssmmessages:CreateDataChannel",
+                "ssmmessages:OpenControlChannel",
+                "ssmmessages:OpenDataChannel"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2messages:AcknowledgeMessage",
+                "ec2messages:DeleteMessage",
+                "ec2messages:FailMessage",
+                "ec2messages:GetEndpoint",
+                "ec2messages:GetMessages",
+                "ec2messages:SendReply"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+EOF
+}
+
+resource "aws_iam_instance_profile" "wordpress_secrets_profile" {
+  name = "wordpress_secrets_profile"
+  role = aws_iam_role.wordpress_iam_role.id
+}
+
+##################################################################
+# RDS configuration
+##################################################################
+
+module "db" {
+  source  = "terraform-aws-modules/rds/aws"
+  version = "~> 2.0"
+
+  identifier = "wordpress-db"
+
+  engine            = "mysql"
+  engine_version    = "5.7.26"
+  instance_class    = "db.t3.medium"
+  allocated_storage = 5
+
+  name     = local.db_creds.dbname
+  username = local.db_creds.username
+  password = local.db_creds.password
+  port     = "3306"
+
+  vpc_security_group_ids = [module.rds_security_group.this_security_group_id]
+
+  backup_retention_period = 0
+  maintenance_window      = "Mon:00:00-Mon:03:00"
+  backup_window           = "03:00-06:00"
+
+  # # Enhanced Monitoring - see example for details on how to create the role
+  # # by yourself, in case you don't want to create it automatically
+  # monitoring_interval    = "30"
+  # monitoring_role_name   = "MyRDSMonitoringRole"
+  # create_monitoring_role = true
+
+  tags = {
+    application = "wordpress"
+  }
+
+  # DB subnet group
+  subnet_ids = module.vpc.private_subnets[*]
+
+  # DB parameter group
+  family = "mysql5.7"
+
+  # DB option group
+  major_engine_version = "5.7"
+
+  # # Snapshot name upon DB deletion
+  # final_snapshot_identifier = "wordpressdb"
+
+  # Database Deletion Protection
+  deletion_protection = false
+
+  parameters = [
+    {
+      name  = "character_set_client"
+      value = "utf8"
+    },
+    {
+      name  = "character_set_server"
+      value = "utf8"
+    }
+  ]
+
+  options = [
+    {
+      option_name = "MARIADB_AUDIT_PLUGIN"
+
+      option_settings = [
+        {
+          name  = "SERVER_AUDIT_EVENTS"
+          value = "CONNECT"
+        },
+        {
+          name  = "SERVER_AUDIT_FILE_ROTATIONS"
+          value = "37"
+        },
+      ]
+    },
+  ]
+}
+
+# Security group allowing EC2 instances to connect.
+module "rds_security_group" {
+  source  = "terraform-aws-modules/security-group/aws"
+  version = "~> 3.0"
+
+  name        = "rds-sg-${var.project.name}"
+  description = "Security group for RDS"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress_with_source_security_group_id = [
+    {
+      rule                     = "mysql-tcp"
+      source_security_group_id = module.asg_security_group.this_security_group_id
+    }
+  ]
+}
+
+# RDS credentials out of Secrets Manager
+data "aws_secretsmanager_secret_version" "rds_creds" {
+  secret_id = "wordpress-rds-secrets"
+}
+
+locals {
+  db_creds = jsondecode(
+    data.aws_secretsmanager_secret_version.rds_creds.secret_string
+  )
 }
